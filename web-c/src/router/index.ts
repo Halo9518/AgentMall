@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useUserStore } from '@/stores/user'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -64,6 +65,25 @@ const router = createRouter({
       meta: { title: '个人中心', requireAuth: true }
     }
   ]
+})
+
+// 路由守卫 — 登录校验
+router.beforeEach(async (to, _from, next) => {
+  const userStore = useUserStore()
+
+  // 需要登录的页面，未登录则跳转登录页
+  if (to.meta.requireAuth && !userStore.isLoggedIn()) {
+    next({ name: 'login', query: { redirect: to.fullPath } })
+    return
+  }
+
+  // 已登录时访问登录/注册页，重定向到首页
+  if ((to.name === 'login' || to.name === 'register') && userStore.isLoggedIn()) {
+    next({ name: 'home' })
+    return
+  }
+
+  next()
 })
 
 export default router

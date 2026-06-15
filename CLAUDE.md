@@ -5,12 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 启动中间件（首次启动自动建表）
-docker-compose up -d
+# 启动后端前确保 MySQL（:3306）和 Redis（:6379）本地服务已运行
+# MySQL: root / ywy, Redis: password ywy
 
 # 后端（server/）
 cd server
 mvn spring-boot:run              # 启动后端 :8080
+
+# 重启后端（先杀旧进程再启动，避免端口占用重试）
+powershell -Command "Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force"
+cd server && mvn spring-boot:run
 
 # C端前端（web-c/）
 cd web-c
@@ -28,17 +32,39 @@ API 文档：后端启动后访问 `http://localhost:8080/doc.html`（Knife4j）
 ## 架构概览
 
 ```
-web-c (:3000) ──┐                 ┌── MySQL (:3306)
+web-c (:3000) ──┐                 ┌── MySQL (:3306, 本地服务)
                 ├── server (:8080) ──┤
-web-merchant (:3001) ─┘           └── Redis (:6379, 购物车)
+web-merchant (:3001) ─┘           └── Redis (:6379, 本地服务, 购物车)
 ```
 
+- **MySQL 和 Redis 均为本地直接安装运行**，非 Docker 容器。`docker-compose.yml` 保留备用
+- **MySQL 连接**：`root / ywy`，数据库 `agentmall`，JDBC URL 中 `characterEncoding` 必须用 `UTF-8`（非 `utf8mb4`——MySQL Connector/J 8.3 不支持后者作为 Java 字符集名）
+- **Redis 连接**：`localhost:6379`，密码 `ywy`
 - **后端**：按模块分层 `entity → mapper → service → controller`，模块目录在 `server/src/main/java/com/agentmall/module/`
 - **C端前端**：Vant4 移动端，路由 10 条，需登录页面通过 `meta.requireAuth` 标记
 - **商家端前端**：Element Plus PC端，hash 路由 6 条，`meta.role: 'MERCHANT'` 控制权限
 - **认证**：JWT（24h过期），Spring Security + 自定义 Filter，`@CurrentUser` 注解注入当前用户
 - **购物车**：Redis Hash `cart:{userId}`，非数据库表
 - **订单**：下单时固化地址快照（JSON列）和菜品快照（order_item 冗余），状态流转 PENDING → ACCEPTED/REJECTED → DELIVERING → COMPLETED
+
+## 认证模块
+
+**后端安全链**：`JwtAuthFilter`（从 Authorization header 提取 Bearer token）→ `JwtTokenProvider`（JJWT 解析 claims，含 userId/phone/role）→ `UserDetailsServiceImpl`（按 userId 查库构建 SecurityContext）→ `@CurrentUser` + `CurrentUserMethodArgumentResolver`（Controller 参数级注入完整 User 实体）
+
+**JWT**：签名算法由密钥长度自动选择，claims 中存 `userId`/`phone`/`role`，`sub` 为 `userId` 字符串。过期时间 24h，配置在 `application.yml` 的 `jwt.expiration`。
+
+**密码**：BCrypt 加密，`SecurityConfig` 暴露 `BCryptPasswordEncoder` Bean 供全局注入。
+
+**权限模型**（`SecurityConfig` 白名单）：
+- 公开：`/api/auth/register`、`/api/auth/login`、`/api/merchants/**`、文档路径
+- 商家角色：`/api/merchant/**` → `hasRole("MERCHANT")`
+- 其余：需认证（任意角色）
+
+**前端认证**：两个前端各自维护独立的 Pinia `userStore`，Token 存储在 localStorage 的不同 key 中——C端用 `token`，商家端用 `merchant_token`，避免同浏览器冲突。Axios 请求拦截器自动携带，响应拦截器处理 401（清除 token）、403（提示无权限）。
+
+**路由守卫**：
+- C端：`meta.requireAuth` 标记的页面，未登录跳 `/login`；已登录访问登录/注册页自动跳首页
+- 商家端：额外校验 `meta.role: 'MERCHANT'`，已登录访问登录页自动跳 `/dashboard`
 
 ## 实施计划
 
@@ -151,6 +177,45 @@ web-merchant (:3001) ─┘           └── Redis (:6379, 购物车)
 
 ---
 
+## 常见问题
+
+### 端口 8080 被占用（重启后端报错）
+
+**现象**：`mvn spring-boot:run` 报端口占用。在 Git Bash 下用 `taskkill /PID` 可能失败（`/PID` 被 Git Bash 路径转换干扰）。
+
+**解决方案**：用 PowerShell 杀掉所有 Java 进程，一句命令即可：
+
+```bash
+powershell -Command "Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force"
+```
+
+> 注意：该命令会杀死所有 Java 进程。若需只释放 8080 端口可定位特定 PID，但上面这条最简单可靠。
+
+### MySQL 连接报 "Unsupported character encoding 'utf8mb4'"
+
+**原因**：MySQL Connector/J 8.3.x 不再将 `utf8mb4` 识别为 Java 字符集别名。
+
+**解决方案**：JDBC URL 中 `characterEncoding` 使用 Java 标准名称 `UTF-8`：
+
+```yaml
+# application-dev.yml — 正确写法
+url: jdbc:mysql://localhost:3306/agentmall?...&characterEncoding=UTF-8&...
+
+# 错误写法（会报 Unsupported encoding）
+url: jdbc:mysql://localhost:3306/agentmall?...&characterEncoding=utf8mb4&...
+```
+
+### Windows curl 发送中文 JSON 报 UTF-8 编码错误
+
+**现象**：`curl -d` 发送含中文字符的 JSON 时，服务端报 `Invalid UTF-8 start byte 0xb2`。
+
+**原因**：Windows 版 curl 默认使用系统编码（GBK）发送请求体。
+
+**解决方案**：
+1. 测试时用纯 ASCII 字符
+2. 或用 `--data-raw` 配合文件输入（确保文件是 UTF-8 编码）
+
+---
 
 <!-- superpowers-zh:begin (do not edit between these markers) -->
 # Superpowers-ZH 中文增强版

@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { useUserStore } from '@/stores/user'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -44,6 +45,32 @@ const router = createRouter({
       meta: { title: '店铺设置', requireAuth: true, role: 'MERCHANT' }
     }
   ]
+})
+
+// 路由守卫 — 登录 + 角色校验
+router.beforeEach(async (to, _from, next) => {
+  const userStore = useUserStore()
+
+  // 需要登录的页面
+  if (to.meta.requireAuth) {
+    if (!userStore.isLoggedIn()) {
+      next({ name: 'login', query: { redirect: to.fullPath } })
+      return
+    }
+    // 角色校验
+    if (to.meta.role && userStore.user && userStore.user.role !== to.meta.role) {
+      next({ name: 'login' })
+      return
+    }
+  }
+
+  // 已登录时访问登录页，重定向到 dashboard
+  if (to.name === 'login' && userStore.isLoggedIn()) {
+    next({ name: 'dashboard' })
+    return
+  }
+
+  next()
 })
 
 export default router

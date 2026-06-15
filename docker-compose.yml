@@ -6,7 +6,7 @@ services:
     container_name: agentmall-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_ROOT_PASSWORD: ywy
       MYSQL_DATABASE: agentmall
       MYSQL_CHARSET: utf8mb4
       MYSQL_COLLATION: utf8mb4_unicode_ci
@@ -25,6 +25,7 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
+    command: redis-server --requirepass ywy
 
 volumes:
   mysql-data:
