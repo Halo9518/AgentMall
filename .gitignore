@@ -1,0 +1,25 @@
+# Maven
+server/target/
+server/**/target/
+
+# Node
+web-c/node_modules/
+web-merchant/node_modules/
+web-c/dist/
+web-merchant/dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Env (keep dev config, exclude sensitive overrides)
+.env
+.env.local
