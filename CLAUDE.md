@@ -9,349 +9,340 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # MySQL: root / ywy, Redis: password ywy
 
 # 后端（server/）
-cd server
-mvn spring-boot:run              # 启动后端 :8080
+cd server && mvn spring-boot:run              # 启动后端 :8080
 
-# 重启后端（先杀旧进程再启动，避免端口占用重试）
-powershell -Command "Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force"
+# 重启后端（先杀旧进程再启动，避免端口占用）
+powershell "Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force"
 cd server && mvn spring-boot:run
 
-# C端前端（web-c/）
-cd web-c
-npm install                      # 首次安装依赖
-npm run dev                      # 启动 :3000，代理 /api → :8080
+# C端前端（web-c/）：:3000，代理 /api → :8080
+cd web-c && npm install && npm run dev
 
-# 商家端前端（web-merchant/）
-cd web-merchant
-npm install                      # 首次安装依赖
-npm run dev                      # 启动 :3001，代理 /api → :8080
+# 商家端前端（web-merchant/）：:3001，代理 /api → :8080
+cd web-merchant && npm install && npm run dev
 ```
 
 API 文档：后端启动后访问 `http://localhost:8080/doc.html`（Knife4j）
 
+---
+
 ## 架构概览
 
 ```
-web-c (:3000) ──┐                 ┌── MySQL (:3306, 本地服务)
+web-c (:3000) ──┐                 ┌── MySQL (:3306, 本地服务, 数据库 agentmall)
                 ├── server (:8080) ──┤
-web-merchant (:3001) ─┘           └── Redis (:6379, 本地服务, 购物车)
+web-merchant (:3001) ─┘           └── Redis (:6379, 本地服务, password ywy, 购物车)
 ```
 
-- **MySQL 和 Redis 均为本地直接安装运行**，非 Docker 容器。`docker-compose.yml` 保留备用
-- **MySQL 连接**：`root / ywy`，数据库 `agentmall`，JDBC URL 中 `characterEncoding` 必须用 `UTF-8`（非 `utf8mb4`——MySQL Connector/J 8.3 不支持后者作为 Java 字符集名）
-- **Redis 连接**：`localhost:6379`，密码 `ywy`
-- **后端**：按模块分层 `entity → mapper → service → controller`，模块目录在 `server/src/main/java/com/agentmall/module/`，现已实现 user/merchant/category/dish/cart/order/statistics 7 个模块
-- **C端前端**：Vant4 移动端，路由 10 条，需登录页面通过 `meta.requireAuth` 标记，已实现首页商家列表、商家详情（分类Tab+菜品）、登录/注册、购物车、结算下单、订单列表/详情、地址管理
-- **商家端前端**：Element Plus PC端，hash 路由 6 条，`meta.role: 'MERCHANT'` 控制权限，已实现 Dashboard、分类管理、菜品管理、订单管理（接单/拒绝/配送/完成）、登录
-- **认证**：JWT（24h过期），Spring Security + 自定义 Filter，`@CurrentUser` 注解注入当前用户
-- **购物车**：Redis Hash `cart:{userId}`，非数据库表
-- **订单**：下单时固化地址快照（JSON列）和菜品快照（order_item 冗余），状态流转 PENDING → ACCEPTED/REJECTED → DELIVERING → COMPLETED
+**后端**：Spring Boot 3.2.5 / MyBatis-Plus 3.5.5 / MySQL 8.0 / Redis 7.2 / JDK 17
 
-## 认证模块
-
-**后端安全链**：`JwtAuthFilter`（从 Authorization header 提取 Bearer token）→ `JwtTokenProvider`（JJWT 解析 claims，含 userId/phone/role）→ `UserDetailsServiceImpl`（按 userId 查库构建 SecurityContext）→ `@CurrentUser` + `CurrentUserMethodArgumentResolver`（Controller 参数级注入完整 User 实体）
-
-**JWT**：签名算法由密钥长度自动选择，claims 中存 `userId`/`phone`/`role`，`sub` 为 `userId` 字符串。过期时间 24h，配置在 `application.yml` 的 `jwt.expiration`。
-
-**密码**：BCrypt 加密，`SecurityConfig` 暴露 `BCryptPasswordEncoder` Bean 供全局注入。
-
-**权限模型**（`SecurityConfig` 白名单）：
-- 公开：`/api/auth/register`、`/api/auth/login`、`/api/merchants/**`、文档路径
-- 商家角色：`/api/merchant/**` → `hasRole("MERCHANT")`
-- 其余：需认证（任意角色）
-
-**前端认证**：两个前端各自维护独立的 Pinia `userStore`，Token 存储在 localStorage 的不同 key 中——C端用 `token`，商家端用 `merchant_token`，避免同浏览器冲突。Axios 请求拦截器自动携带，响应拦截器处理 401（清除 token）、403（提示无权限）。
-
-**路由守卫**：
-- C端：`meta.requireAuth` 标记的页面，未登录跳 `/login`；已登录访问登录/注册页自动跳首页
-- 商家端：额外校验 `meta.role: 'MERCHANT'`，已登录访问登录页自动跳 `/dashboard`
-
-## 商家 & 分类 & 菜品模块
-
-### 商家（Merchant）
-- **Entity**: `merchant` 表 — userId(关联用户)、name/logo/phone/address/description/openingHours、status（1营业/0歇业）、minAmount(起送价)、deliveryFee(配送费)
-- **C端**: `MerchantController` (`/api/merchants`) — 列表（仅 status=1）、详情，公开访问
-- **商家端**: 通过 `MerchantService.getByUserId(userId)` 获取当前登录商家的 merchantId，用于分类/菜品/订单的归属校验
-- **归属校验模式**：所有商家端写操作校验 `entity.getMerchantId().equals(currentMerchantId)`，防止越权
-
-### 分类（Category）
-- **Entity**: `category` 表 — merchantId、name、sortOrder
-- **C端**: `CategoryController` (`/api/merchants/{merchantId}/categories`) — 按商家查分类列表，公开访问
-- **商家端**: `CategoryManageController` (`/api/merchant/categories`) — 完整 CRUD，需 MERCHANT 角色
-
-### 菜品（Dish）
-- **Entity**: `dish` 表 — merchantId、categoryId、name/image/price/description、salesCount、status（1上架/0下架）
-- **DTO**: `DishDTO`（categoryId/name/price/image/description），含 `@Valid` 校验
-- **VO**: `DishVO.fromEntity()` — 响应对象，隐藏 `createdAt`/`updatedAt`
-- **C端**: `DishController` (`/api/merchants/{merchantId}/dishes`) — 按商家+分类筛选上架菜品，公开访问
-- **商家端**: `DishManageController` (`/api/merchant/dishes`) — 分页列表+分类筛选、CRUD、上下架切换（`PUT .../{id}/status`），需 MERCHANT 角色
-
-## Dashboard 统计模块
-
-- **3 个 API**（`/api/merchant/statistics`，需 MERCHANT 角色）：
-  - `GET /overview` — 今日/本周/本月 订单数+金额、待处理订单数
-  - `GET /trend?days=7` — 近 N 天每日趋势
-  - `GET /top-dishes?limit=10` — 热销菜品 Top N
-- **数据源**: `orders` + `order_item` 表，SQL 通过 MyBatis `@Select` 注解直接写在 Mapper 上
-- **前台**: 统计卡片（彩色顶边）+ CSS 柱状图 + 排名列表（前3名金银铜色）
-
-## 订单模块
-
-### 实体与数据模型
-- `Orders` extends `BaseEntity`，字段：orderNo、userId、merchantId、addressSnap(JSON)、totalAmount、deliveryFee、payAmount、status、remark、payTime
-- `OrderItem` 不含 `createdAt`/`updatedAt`（仅 id + 业务字段），字段：orderId、dishId、dishName(快照)、dishImage(快照)、price、quantity、amount
-- **DTO**: `CreateOrderDTO`（addressSnap JSON + remark）
-- **VO**: `OrderVO`（含 merchantName + items）+ `OrderItemVO`，`fromEntity()` 工厂方法
-
-### 订单状态流转
-```
-PENDING ──→ ACCEPTED ──→ DELIVERING ──→ COMPLETED
-   │            │
-   └──→ CANCELLED (用户取消)
-            │
-            └──→ REJECTED (商家拒绝)
-```
-- 仅 PENDING 状态用户可取消
-- 仅 PENDING 状态商家可接单/拒绝
-- 仅 ACCEPTED 状态可转 DELIVERING
-- 仅 DELIVERING 状态可转 COMPLETED（自动设 payTime）
-- 状态校验在 Service 层，非法转换抛 BusinessException
-
-### C端 API（`/api/orders`，需登录）
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/orders` | 下单（从购物车创建，清空购物车） |
-| GET | `/api/orders` | 我的订单列表（分页） |
-| GET | `/api/orders/{id}` | 订单详情（含明细） |
-| PUT | `/api/orders/{id}/cancel` | 取消订单（仅 PENDING） |
-
-### 商家端 API（`/api/merchant/orders`，需 MERCHANT 角色）
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/merchant/orders` | 订单列表（分页+状态筛选） |
-| GET | `/api/merchant/orders/{id}` | 订单详情（含明细，带归属校验） |
-| PUT | `/api/merchant/orders/{id}/status?status=X` | 更新状态（ACCEPTED/REJECTED/DELIVERING/COMPLETED） |
-
-### 关键实现
-- **下单流程**：读取 Redis 购物车 → 验证商家营业 → 生成订单号（yyyyMMddHHmmss + 4位随机数）→ 插入 Orders + 批量插入 OrderItem（菜品快照）→ 清空购物车 → `@Transactional` 保证原子性
-- **订单号**：时间戳+随机数，确保唯一性
-- **商家名称**：VO 中通过 `MerchantService.getById()` 查询填充，不冗余存储
-- **归属校验**：商家端所有操作校验 `order.getMerchantId().equals(currentMerchantId)`
-- **前端 C端**：结算页（地址表单 + 商品列表 + 金额明细 + 提交）、订单列表（状态标签 + 分页）、订单详情（状态头 + 地址 + 商品 + 金额 + 取消按钮）
-- **前端 商家端**：订单管理表格（状态筛选 + 操作按钮按状态变化 + 详情弹窗）
-
-## 购物车模块（Redis）
-
-- **存储结构**: Redis Hash `cart:{userId}`，field=dishId，value=CartItemVO JSON
-- **5 个 API**（`/api/cart`，需登录）：
-  - `GET /` — 获取购物车（含商家信息、商品列表、总金额）
-  - `POST /` — 添加商品（body: dishId + quantity），自动累加同商品数量
-  - `PUT /{dishId}?quantity=N` — 修改数量（≤0 则删除）
-  - `DELETE /{dishId}` — 删除单项
-  - `DELETE /` — 清空
-- **跨商家校验**：添加时若购物车已有其他商家商品，抛出 BusinessException "购物车中已有其他商家的商品，请先清空"
-- **菜品/商家状态校验**：添加时验证菜品上架 + 商家营业，否则拒绝
-- **VO 设计**：CartItemVO（dishId/dishName/dishImage/price/quantity/merchantId/merchantName/subtotal），CartVO（merchantId/merchantName/items/totalAmount）
-- **前端**: Pinia `cartStore`（fetch/add/update/remove/clear），Vant Stepper 改数量，底部结算栏
-
-## 地址模块
-
-- **Entity**: `address` 表 — userId、contactName、phone、province、city、district、detail、isDefault（1默认/0非默认）
-- **DTO**: `AddressDTO`（全字段 `@NotBlank` 校验，district 可选）
-- **5 个 API**（`/api/addresses`，需登录）：
-  - `GET /` — 地址列表（按默认优先+创建时间倒序）
-  - `POST /` — 添加（首个地址自动设默认）
-  - `PUT /{id}` — 修改（校验 userId 归属）
-  - `DELETE /{id}` — 删除（删默认地址时自动提升其他地址为默认）
-  - `PUT /{id}/default` — 设为默认（先清所有默认再设）
-- **归属校验**：所有操作通过 `eq(Address::getUserId, userId)` 限制
-- **前端**: 地址卡片列表（Vant SwipeCell 左滑编辑/删除）、底部添加按钮、弹窗表单、点击非默认地址可设默认
-
-## 模块目录索引
-
-```
-server/src/main/java/com/agentmall/module/
-├── user/        # 用户（Step 3）— entity/mapper/service/dto/vo/controller
-├── merchant/    # 商家（Step 4）— entity/mapper/service/controller
-├── category/    # 分类（Step 4）— entity/mapper/service/controller（C端+商家端双控制器）
-├── dish/        # 菜品（Step 4）— entity/mapper/service/dto/vo/controller（C端+商家端双控制器）
-├── cart/        # 购物车（Step 5）— Redis Hash，dto/vo/service/controller
-├── order/       # 订单（Step 6）— entity/mapper/dto/vo/service/controller（C端+商家端双控制器）
-├── address/     # 地址（Step 7）— entity/mapper/dto/service/controller
-├── statistics/  # 统计（Dashboard）— service/controller
-```
-
-## API 实现进度（34 个中已完成 34 个，全部完成）
-
-| 分类 | 状态 |
-|------|------|
-| 认证 `/api/auth` | 5/5 ✅ |
-| 商家 `/api/merchants` | 2/2 ✅ |
-| 分类 C端 `/api/merchants/{id}/categories` | 1/1 ✅ |
-| 分类 商家端 `/api/merchant/categories` | 4/4 ✅ |
-| 菜品 C端 `/api/merchants/{id}/dishes` | 1/1 ✅ |
-| 菜品 商家端 `/api/merchant/dishes` | 5/5 ✅ |
-| 统计 `/api/merchant/statistics` | 3/3 ✅ |
-| 购物车 `/api/cart` | 5/5 ✅ |
-| 订单 `/api/orders` + `/api/merchant/orders` | 7/7 ✅ |
-| 地址 `/api/addresses` | 5/5 ✅ |
-
-## 实施计划
-
-详细设计文档：`F:\ClaudeCode\plans\claude-toasty-cupcake.md`（8 步实施，28 个 API，8 张表）
-- ✅ Step 1: 基础设施
-- ✅ Step 2: 公共层
-- ✅ Step 3: 认证模块
-- ✅ Step 4: 商家 & 分类 & 菜品
-- ✅ Step 5: 购物车（Redis）
-- ✅ Step 6: 订单
-- ✅ Step 7: 地址管理
-- ✅ Step 8: 数据统计（已提前完成）
+**前端 C端**：Vue 3.4 + Vite 5 + Vant 4.9（移动端）
+**前端 商家端**：Vue 3.4 + Vite 5 + Element Plus 2.7（PC 端）
 
 ---
 
-# 项目技术栈说明（版本兼容版）
+## 快速入口
 
-> 基于单体架构的餐饮外卖系统，采用前后端分离模式，后端 Spring Boot 3.2.x，前端 Vue 3，数据库 MySQL 8.0。
+| 内容 | 位置 |
+|------|------|
+| 后端模块 | `server/src/main/java/com/agentmall/module/` |
+| 前端路由 | `web-c/src/router/index.ts` / `web-merchant/src/router/index.ts` |
+| 安全配置 | `server/src/main/java/com/agentmall/config/SecurityConfig.java` |
+| JWT 配置 | `server/src/main/resources/application.yml`（`jwt.*`） |
+| 测试账户 | 见下方**测试数据** |
+| DB Schema | 见下方**数据库** |
+| API 文档 | `http://localhost:8080/doc.html`（启动后） |
 
-## 1. 后端核心框架
+---
 
-| 分类 | 技术 | 版本 | 说明与兼容性要求 |
-|------|------|------|------------------|
-| 运行时环境 | JDK | 17 | Spring Boot 3.x 最低要求 JDK 17 |
-| 基础框架 | Spring Boot | 3.2.5 | 稳定版，要求 JDK 17+ |
-| Web 层 | Spring MVC | 6.1.x（内嵌） | Spring Boot 3.2.5 自带 |
-| 数据访问层 | MyBatis-Plus | 3.5.5 | 适配 Spring Boot 3.x，需要 JDK 17 |
-| 数据库连接池 | HikariCP | 5.0.1 | Spring Boot 3.2.5 默认自带 |
-| 工具库 | Hutool | 5.8.26 | 无版本冲突，兼容 JDK 17 |
-| | Guava | 33.1.0-jre | 适配 JDK 17 |
-| JSON 处理 | Jackson | 2.15.3 | Spring Boot 3.2.5 自带 |
-| 参数校验 | Jakarta Validation | 3.0.2 | Spring Boot 3.2.5 内置，配合 Hibernate Validator 8.0 |
+## 测试数据
 
-## 2. 数据库与存储
+| 角色 | 手机号 | 密码 | 关联商家 |
+|------|--------|------|---------|
+| CUSTOMER | 13900000001 | 123456 | — |
+| MERCHANT | 13900000002 | 123456 | 老王炒饭（userId=2, merchantId=1, deliveryFee=3） |
+| MERCHANT | 13900000003 | 123456 | 小李汉堡店（userId=3, merchantId=2） |
 
-| 类型 | 技术 | 版本 | 说明与兼容性 |
-|------|------|------|--------------|
-| 关系数据库 | MySQL | 8.0.33 | 使用 8.0.x 稳定版，驱动兼容 JDBC 8.0 |
-| MySQL驱动 | mysql-connector-j | 8.0.33 | 必须与 MySQL 版本匹配，Spring Boot 推荐版本 |
-| 缓存数据库 | Redis | 7.2.4 | 稳定版，兼容 Spring Data Redis 3.2.x |
-| 对象存储 | MinIO | 8.5.9 | 自建对象存储，客户端兼容 OkHttp 4.x |
-| 可选搜索 | Elasticsearch | 8.11.4 | 如需引入，配合 Spring Data Elasticsearch 5.2.x |
+---
 
-## 3. 消息队列与异步处理
+## 数据库
 
-| 组件 | 技术 | 版本 | 说明与兼容性 |
-|------|------|------|--------------|
-| 消息队列 | RabbitMQ | 3.13.x | 稳定版，支持 AMQP 0-9-1 协议 |
+### 表结构（8 张表）
 
+```
+user ──< address
+user ──< orders ──< order_item
+user(role=MERCHANT) ── merchant ──< category ──< dish
+                                     merchant ──< dish
+                                     merchant ──< orders
+```
 
-## 4. 任务调度
+| 表 | 说明 | 关键字段 |
+|----|------|---------|
+| `user` | 用户 | phone(唯一), password(BCrypt), role(CUSTOMER/MERCHANT) |
+| `merchant` | 商家 | userId(关联user), name, status(1营业/0歇业), deliveryFee, minAmount |
+| `category` | 菜品分类 | merchantId, name, sortOrder |
+| `dish` | 菜品 | merchantId, categoryId, name, price, status(1上架/0下架), salesCount |
+| `orders` | 订单 | orderNo(唯一), userId, merchantId, addressSnap(JSON), status, payAmount |
+| `order_item` | 订单明细 | orderId, dishName(快照), price(快照), quantity, amount |
+| `address` | 收货地址 | userId, contactName, phone, province/city/district/detail, isDefault |
+| `cart` | 购物车 | **Redis Hash** `cart:{userId}`，非数据库表 |
 
-| 组件 | 技术 | 版本 | 说明 |
+> `orders` 和 `order_item` 用菜品快照（下单时固化名称/价格），不随菜品表变更。
+> `address_snap` 列存 JSON，内容为 `{contactName, phone, province, city, district, detail}`。
+
+详情建表 SQL 见 `F:\ClaudeCode\plans\claude-toasty-cupcake.md`。
+
+---
+
+## 后端模块
+
+### 分层约定
+
+每个模块结构：`entity → mapper → service(impl) → [dto/vo] → controller`
+
+### MerchantContext（商家身份解析）
+
+`MerchantContext.java` 是公用组件，替代各 Controller 重复的 `getCurrentMerchantId(User)`：
+```java
+@Component
+public class MerchantContext {
+    public Long getCurrentMerchantId(User user) {
+        Merchant merchant = merchantService.getByUserId(user.getId());
+        if (merchant == null) throw new BusinessException("商家不存在");
+        return merchant.getId();
+    }
+}
+```
+所有商家端 Controller 均注入 `MerchantContext`，通过 `merchantContext.getCurrentMerchantId(user)` 获取当前登录商家的 ID。
+
+### 归属校验模式
+
+商家端写操作必须先获取当前商家 ID，再校验操作实体归属：
+```java
+Long merchantId = merchantContext.getCurrentMerchantId(user);
+Entity exist = service.getById(id);
+if (exist == null || !exist.getMerchantId().equals(merchantId)) {
+    throw new BusinessException("资源不存在");
+}
+```
+
+### 模块列表
+
+| 模块 | 目录 | 说明 |
+|------|------|------|
+| **user** | `module/user/` | 用户注册/登录、个人信息修改、密码修改（5 API） |
+| **merchant** | `module/merchant/` | 商家列表浏览（C端公开）、商家管理（商家端） |
+| **category** | `module/category/` | C端浏览 + 商家端 CRUD（双控制器） |
+| **dish** | `module/dish/` | C端浏览 + 商家端 CRUD/上下架（双控制器 + DisDTO/DisVO） |
+| **cart** | `module/cart/` | Redis Hash 增删改查（5 API） |
+| **order** | `module/order/` | C端下单/查询/取消 + 商家端接单/配送/完成（双控制器） |
+| **address** | `module/address/` | 地址 CRUD + 默认地址管理（5 API） |
+| **statistics** | `module/statistics/` | Dashboard 概览/趋势/热销 Top（3 API） |
+
+### C端模块 — 公开 API
+
+| 模块 | 路径 | 说明 | 权限 |
 |------|------|------|------|
-| 分布式定时任务 | XXL-JOB | 2.4.1 | 支持 Spring Boot 3.x，执行器需要 JDK 17 |
-| 简单定时任务 | Spring Scheduled | 同 Spring Boot | 单机环境下可直接使用 |
+| **商家** | `GET /api/merchants` | 商家列表（仅 status=1） | 公开 |
+| | `GET /api/merchants/{id}` | 商家详情 | 公开 |
+| **分类** | `GET /api/merchants/{id}/categories` | 某商家分类列表 | 公开 |
+| **菜品** | `GET /api/merchants/{id}/dishes?categoryId=` | 上架菜品（按分类筛选） | 公开 |
 
-## 5. 安全与认证
+### C端模块 — 需登录 API
 
-| 组件 | 技术 | 版本 | 说明 |
+| 模块 | 方法 | 路径 | 说明 |
 |------|------|------|------|
-| 安全框架 | Spring Security | 6.2.4 | Spring Boot 3.2.5 内置 |
-| JWT | JJWT | 0.12.5 | 兼容 JDK 17，支持 EdDSA 等现代算法 |
-| 加密库 | BCrypt（Spring Security自带） | 同 Spring Security | 用于密码加密 |
+| **购物车** | GET | `/api/cart` | 获取购物车（含商家名、商品、配送费、总金额） |
+| | POST | `/api/cart` | 添加商品（body: dishId + quantity），跨商家校验 |
+| | PUT | `/api/cart/{dishId}?quantity=N` | 修改数量（≤0 删除） |
+| | DELETE | `/api/cart/{dishId}` | 删除单项 |
+| | DELETE | `/api/cart` | 清空 |
+| **订单** | POST | `/api/orders` | 下单（从购物车创建，自动清空购物车） |
+| | GET | `/api/orders` | 我的订单列表（分页） |
+| | GET | `/api/orders/{id}` | 订单详情（含商品明细） |
+| | PUT | `/api/orders/{id}/cancel` | 取消（仅 PENDING 状态） |
+| **地址** | GET | `/api/addresses` | 地址列表（默认优先 + 时间倒序） |
+| | POST | `/api/addresses` | 添加（首个自动设默认） |
+| | PUT | `/api/addresses/{id}` | 修改 |
+| | DELETE | `/api/addresses/{id}` | 删除（删默认时自动提升） |
+| | PUT | `/api/addresses/{id}/default` | 设为默认 |
+| **认证** | GET | `/api/auth/info` | 当前用户信息 |
+| | PUT | `/api/auth/info` | 修改个人信息 |
+| | PUT | `/api/auth/password` | 修改密码 |
 
-## 6. API 文档与测试
+### 商家端 API（需 MERCHANT 角色，`/api/merchant/**`）
 
-| 组件 | 技术 | 版本 | 说明 |
+| 模块 | 方法 | 路径 | 说明 |
 |------|------|------|------|
-| API 文档生成 | SpringDoc OpenAPI | 2.5.0 | 适配 Spring Boot 3.x（springdoc-openapi-starter-webmvc-ui） |
-| 增强界面 | Knife4j | 4.4.0 | 基于 SpringDoc 的增强 UI，版本需对齐 |
-| 单元测试 | JUnit | 5.10.2 | Spring Boot 3.2.5 内置 |
-| Mock 框架 | Mockito | 5.11.0 | 与 JUnit 5 集成 |
-| 集成测试 | TestContainers | 1.19.7 | 支持 MySQL、Redis、RocketMQ 容器化测试 |
-| 压力测试 | JMeter | 5.6.3 | 独立工具，无版本冲突 |
+| **分类** | GET/POST | `/api/merchant/categories` | 列表 / 添加 |
+| | PUT/DELETE | `/api/merchant/categories/{id}` | 修改 / 删除 |
+| **菜品** | GET | `/api/merchant/dishes?page=&categoryId=` | 分页列表 + 分类筛选 |
+| | POST | `/api/merchant/dishes` | 添加 |
+| | PUT | `/api/merchant/dishes/{id}` | 修改 |
+| | PUT | `/api/merchant/dishes/{id}/status` | 上下架切换 |
+| | DELETE | `/api/merchant/dishes/{id}` | 删除 |
+| **订单** | GET | `/api/merchant/orders?page=&status=` | 分页 + 状态筛选 |
+| | GET | `/api/merchant/orders/{id}` | 详情（归属校验） |
+| | PUT | `/api/merchant/orders/{id}/status?status=X` | 更新状态 |
+| **统计** | GET | `/api/merchant/statistics/overview` | 今日/周/月概览 |
+| | GET | `/api/merchant/statistics/trend?days=7` | 近 N 天趋势 |
+| | GET | `/api/merchant/statistics/top-dishes?limit=10` | 热销 Top N |
 
-## 7. 前端技术栈
+### 订单状态流转
 
-| 分类 | 技术 | 版本 | 说明与兼容性 |
-|------|------|------|--------------|
-| 框架 | Vue | 3.4.27 | 最新稳定版 |
-| 构建工具 | Vite | 5.2.11 | 需 Node.js 18+ / 20+ |
-| 状态管理 | Pinia | 2.1.7 | 适配 Vue 3 |
-| 路由 | Vue Router | 4.3.2 | 适配 Vue 3 |
-| HTTP 客户端 | Axios | 1.6.8 | 无框架依赖 |
-| UI 组件库（C端） | Vant | 4.9.4 | 移动端组件库，适配 Vue 3 |
-| UI 组件库（后台） | Element Plus | 2.7.4 | PC 端组件库，适配 Vue 3 |
-| 地图 API | 高德地图 JS API | 2.0 | 浏览器端调用，无版本冲突 |
-| 样式预处理器 | SCSS (sass-loader) | 14.1.1 | 配合 Vite，Node.js 版本需匹配 |
-| 代码规范 | ESLint | 8.57.0 | 配合 @vue/eslint-config-typescript 14.0.0 |
-| | Prettier | 3.2.5 | 与 ESLint 集成 |
+```
+PENDING ──→ ACCEPTED ──→ DELIVERING ──→ COMPLETED
+   │            │
+   └──→ CANCELLED       └──→ REJECTED
+```
+- **用户取消**：仅 PENDING
+- **商家接单/拒绝**：仅 PENDING
+- **配送**：仅 ACCEPTED
+- **完成**：仅 DELIVERING（自动写入 payTime）
+- 非法转换在 Service 层抛 `BusinessException`
 
-## 8. 开发与运维工具
+### 购物车（Redis）
 
-| 分类 | 工具 | 版本 | 说明 |
-|------|------|------|------|
-| 版本控制 | Git | 2.40+ | 任意高版本即可 |
-| 依赖管理（后端） | Maven | 3.9.6 | 需要 JDK 17 |
-| 依赖管理（前端） | npm | 10.5.0 | 配合 Node.js 20 LTS |
-| 容器化 | Docker | 24.0.9 | 开发/生产环境容器编排 |
-| 容器编排 | Docker Compose | 2.24.6 | 本地快速启动中间件 |
-| 日志框架 | SLF4J + Logback | 2.0.13 | Spring Boot 3.2.5 自带 |
-| 日志收集（可选） | ELK Stack | 8.11.4 | Elasticsearch + Logstash + Kibana 版本统一 |
-| CI/CD（可选） | Jenkins | 2.440.3 | 需 JDK 11 或 17 运行 |
+- 结构：Redis Hash `cart:{userId}`，field=dishId，value=CartItemVO(JSON)
+- 跨商家校验：添加时若购物车已有其他商家商品，抛 BusinessException
+- 菜品/商家状态校验：添加时验证菜品上架 + 商家营业
+- CartVO 包含：merchantId, merchantName, items[], totalAmount, **deliveryFee**
 
-## 9. 核心依赖版本对齐说明（确保兼容）
+### 下单流程
 
-| 依赖组 | 版本组合说明 |
-|--------|--------------|
-| Spring Boot + MyBatis-Plus | MyBatis-Plus 3.5.5 明确支持 Spring Boot 3.x，使用官方 `mybatis-plus-boot-starter` |
-| Spring Boot + MySQL驱动 | Spring Boot 3.2.5 默认推荐 `mysql:mysql-connector-java:8.0.33`，无需手动指定 |
-| Spring Boot + Redis | `spring-boot-starter-data-redis` 引入 Lettuce 6.3.1，兼容 Redis 7.x |
-| Spring Boot + RocketMQ | 使用 `org.apache.rocketmq:rocketmq-spring-boot-starter:2.2.3`，支持 Spring Boot 3.x |
-| Spring Boot + SpringDoc | `springdoc-openapi-starter-webmvc-ui:2.5.0` 内置 Swagger UI 及 OpenAPI 3.0 |
-| Spring Boot + JJWT | JJWT 0.12.5 支持 JDK 17，无 `javax.xml.bind` 依赖问题 |
-| Vue 3 + Vite | Vite 5.x 需要 Node.js 18+/20+，Vue 3 官方模板默认组合 |
-| Element Plus + Vue 3 | Element Plus 2.7.x 依赖 Vue 3.2+，完全兼容 |
+1. 读取 Redis 购物车 → 2. 验证商家营业 → 3. 生成订单号（yyyyMMddHHmmss+4位随机数）
+4. 插入 Orders → 5. 批量插入 OrderItem（菜品快照） → 6. 清空购物车
+→ `@Transactional` 保证原子性
+
+---
+
+## 前端
+
+### 项目结构
+
+```
+web-c/src/                    web-merchant/src/
+├── api/                       ├── api/
+│   ├── request.ts (axios)     │   ├── request.ts (axios)
+│   ├── auth.ts                │   ├── auth.ts
+│   ├── merchant.ts            │   ├── category.ts
+│   ├── cart.ts                │   ├── dish.ts
+│   ├── order.ts               │   ├── order.ts
+│   └── address.ts             │   ├── statistics.ts
+├── stores/                    │   └── merchant.ts
+│   ├── user.ts                ├── stores/user.ts
+│   └── cart.ts                ├── router/index.ts
+├── router/index.ts            └── views/
+├── views/                         ├── login/
+│   ├── home/                      ├── dashboard/
+│   ├── merchant/                  ├── categories/
+│   ├── login/                     ├── dishes/
+│   ├── register/                  ├── orders/
+│   ├── cart/                      └── settings/
+│   ├── checkout/
+│   ├── orders/
+│   ├── addresses/
+│   └── profile/
+└── styles/
+```
+
+### C端路由（10 条，Vue Router history 模式）
+
+| 路径 | 页面 | 需登录 | 备注 |
+|------|------|--------|------|
+| `/` | 首页（商家列表） | ❌ | |
+| `/merchant/:id` | 商家详情 + 菜品 | ❌ | Vant Tabs 按分类展示 |
+| `/login` | 登录 | ❌ | 已登录自动跳首页 |
+| `/register` | 注册 | ❌ | |
+| `/cart` | 购物车 | ✅ | Stepper 改数量 |
+| `/checkout` | 结算下单 | ✅ | 地址选择 + 商品清单 + 金额 |
+| `/orders` | 我的订单 | ✅ | 状态标签 + 分页 |
+| `/orders/:id` | 订单详情 | ✅ | 状态头部 + 取消按钮 |
+| `/addresses` | 地址管理 | ✅ | SwipeCell 编辑/删除 |
+| `/profile` | 个人中心 | ✅ | |
+
+### 商家端路由（6 条，Vue Router hash 模式）
+
+| 路径 | 页面 | 权限 |
+|------|------|------|
+| `/login` | 商家登录 | 未登录 |
+| `/dashboard` | 数据概览 | MERCHANT |
+| `/categories` | 分类管理 | MERCHANT |
+| `/dishes` | 菜品管理 | MERCHANT |
+| `/orders` | 订单管理 | MERCHANT |
+| `/settings` | 店铺设置 | MERCHANT |
+
+### 认证机制
+
+- **Token 存储**：C端 → `localStorage('token')`，商家端 → `localStorage('merchant_token')`
+- **拦截器**：Axios request 自动加 `Authorization: Bearer <token>`
+- **401 处理**：清除 token，toast 提示
+- **路由守卫**：`meta.requireAuth` 检查登录，`meta.role: 'MERCHANT'` 检查角色
+
+---
+
+## 安全配置
+
+```
+SecurityConfig 白名单:
+  公开:  POST /api/auth/register, POST /api/auth/login, /api/merchants/**, /doc.html, /v3/api-docs/**
+  商家:  /api/merchant/** → hasRole("MERCHANT")
+  其他:  需认证（任意角色）
+```
+
+JWT：claims 含 userId/phone/role，sub=userId，24h 过期，签名算法由密钥长度自动选择。
 
 ---
 
 ## 常见问题
 
-### 端口 8080 被占用（重启后端报错）
-
-**现象**：`mvn spring-boot:run` 报端口占用。在 Git Bash 下用 `taskkill /PID` 可能失败（`/PID` 被 Git Bash 路径转换干扰）。
-
-**解决方案**：用 PowerShell 杀掉所有 Java 进程，一句命令即可：
+### 端口 8080 被占用
 
 ```bash
-powershell -Command "Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force"
+powershell "Get-Process -Name java -ErrorAction SilentlyContinue | Stop-Process -Force"
 ```
-
-> 注意：该命令会杀死所有 Java 进程。若需只释放 8080 端口可定位特定 PID，但上面这条最简单可靠。
 
 ### MySQL 连接报 "Unsupported character encoding 'utf8mb4'"
 
-**原因**：MySQL Connector/J 8.3.x 不再将 `utf8mb4` 识别为 Java 字符集别名。
-
-**解决方案**：JDBC URL 中 `characterEncoding` 使用 Java 标准名称 `UTF-8`：
-
+JDBC URL 中 `characterEncoding` 必须用 `UTF-8`（非 `utf8mb4`）：
 ```yaml
-# application-dev.yml — 正确写法
 url: jdbc:mysql://localhost:3306/agentmall?...&characterEncoding=UTF-8&...
-
-# 错误写法（会报 Unsupported encoding）
-url: jdbc:mysql://localhost:3306/agentmall?...&characterEncoding=utf8mb4&...
 ```
 
-### Windows curl 发送中文 JSON 报 UTF-8 编码错误
+### Windows curl 发送中文 JSON 报错
 
-**现象**：`curl -d` 发送含中文字符的 JSON 时，服务端报 `Invalid UTF-8 start byte 0xb2`。
+Windows curl 默认 GBK 编码。测试时用 ASCII 字符，或用 `--data-raw` + UTF-8 文件。
 
-**原因**：Windows 版 curl 默认使用系统编码（GBK）发送请求体。
+### category 表缺少 updated_at 列
 
-**解决方案**：
-1. 测试时用纯 ASCII 字符
-2. 或用 `--data-raw` 配合文件输入（确保文件是 UTF-8 编码）
+如果 MyBatis-Plus 插入报 "Unknown column 'updated_at'"，是因为 `Category extends BaseEntity` 含 `@TableField(fill = INSERT_UPDATE)`，但表缺少该列：
+```sql
+ALTER TABLE category ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+```
+
+---
+
+## 开发指南
+
+### 添加新模块步骤
+
+1. 在 `module/` 下建包：`entity` / `mapper` / `service`(impl) / `dto`(可选) / `vo`(可选) / `controller`
+2. Entity 继承 `BaseEntity`（含 id/createdAt/updatedAt 自动填充）
+3. Mapper 继承 `BaseMapper<T>`
+4. Service 实现业务逻辑，Controller 注入 Service
+5. 商家端模块注入 `MerchantContext` 获取商家 ID，做归属校验
+6. C端分页查询用 MyBatis-Plus `Page` + `PageResult.of()`
+7. 前端在对应 `api/` 目录下创建 API 客户端，`views/` 下创建页面
+
+### 风格约定
+
+- 商家端写操作校验 `entity.getMerchantId().equals(currentMerchantId)`
+- Controller 参数用 `@CurrentUser User user` 获取当前登录用户
+- DTO 用 `@Valid` + `jakarta.validation.constraints` 校验
+- VO 用 `static fromEntity()` 工厂方法
+- 业务异常抛 `BusinessException`（GlobalExceptionHandler 统一处理）
+- 分页响应统一用 `PageResult<T>` 包装
 
 ---
 
@@ -372,29 +363,27 @@ url: jdbc:mysql://localhost:3306/agentmall?...&characterEncoding=utf8mb4&...
 Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` 文件。
 
 - **brainstorming**: 在任何创造性工作之前必须使用此技能——创建功能、构建组件、添加功能或修改行为。在实现之前先探索用户意图、需求和设计。
-- **chinese-code-review**: 中文 review 沟通参考——话术模板、分级标注（必须修复/建议修改/仅供参考）、国内团队常见反模式应对。仅在用户显式 /chinese-code-review 时调用，不要根据上下文自动触发。
-- **chinese-commit-conventions**: 中文 commit 与 changelog 配置参考——Conventional Commits 中文适配、commitlint/husky/commitizen 中文模板、conventional-changelog 中文配置。仅在用户显式 /chinese-commit-conventions 时调用，不要根据上下文自动触发。
-- **chinese-documentation**: 中文文档排版参考——中英文空格、全半角标点、术语保留、链接格式、中文文案排版指北约定。仅在用户显式 /chinese-documentation 时调用，不要根据上下文自动触发。
-- **chinese-git-workflow**: 国内 Git 平台配置参考——Gitee、Coding.net、极狐 GitLab、CNB 的 SSH/HTTPS/凭据/CI 接入差异与镜像同步配置。仅在用户显式 /chinese-git-workflow 时调用，不要根据上下文自动触发。
-- **dispatching-parallel-agents**: 当面对 2 个以上可以独立进行、无共享状态或顺序依赖的任务时使用
-- **executing-plans**: 当你有一份书面实现计划需要在单独的会话中执行，并设有审查检查点时使用
-- **finishing-a-development-branch**: 当实现完成、所有测试通过、需要决定如何集成工作时使用——通过提供合并、PR 或清理等结构化选项来引导开发工作的收尾
-- **mcp-builder**: MCP 服务器构建方法论 — 系统化构建生产级 MCP 工具，让 AI 助手连接外部能力
-- **receiving-code-review**: 收到代码审查反馈后、实施建议之前使用，尤其当反馈不明确或技术上有疑问时——需要技术严谨性和验证，而非敷衍附和或盲目执行
-- **requesting-code-review**: 完成任务、实现重要功能或合并前使用，用于验证工作成果是否符合要求
-- **subagent-driven-development**: 当在当前会话中执行包含独立任务的实现计划时使用
-- **systematic-debugging**: 遇到任何 bug、测试失败或异常行为时使用，在提出修复方案之前执行
-- **test-driven-development**: 在实现任何功能或修复 bug 时使用，在编写实现代码之前
-- **using-git-worktrees**: 当需要开始与当前工作区隔离的功能开发，或在执行实现计划之前使用——通过原生工具或 git worktree 回退机制确保隔离工作区存在
-- **using-superpowers**: 在开始任何对话时使用——确立如何查找和使用技能，要求在任何响应（包括澄清性问题）之前调用 Skill 工具
-- **verification-before-completion**: 在宣称工作完成、已修复或测试通过之前使用，在提交或创建 PR 之前——必须运行验证命令并确认输出后才能声称成功；始终用证据支撑断言
-- **workflow-runner**: 在 Claude Code / OpenClaw / Cursor 中直接运行 agency-orchestrator YAML 工作流——无需 API key，使用当前会话的 LLM 作为执行引擎。当用户提供 .yaml 工作流文件或要求多角色协作完成任务时触发。
-- **writing-plans**: 当你有规格说明或需求用于多步骤任务时使用，在动手写代码之前
-- **writing-skills**: 当创建新技能、编辑现有技能或在部署前验证技能是否有效时使用
+- **chinese-code-review**: 中文 review 沟通参考——话术模板、分级标注、国内团队常见反模式应对。仅在用户显式 /chinese-code-review 时调用。
+- **chinese-commit-conventions**: 中文 commit 与 changelog 配置参考。仅在用户显式 /chinese-commit-conventions 时调用。
+- **chinese-documentation**: 中文文档排版参考。仅在用户显式 /chinese-documentation 时调用。
+- **chinese-git-workflow**: 国内 Git 平台配置参考。仅在用户显式 /chinese-git-workflow 时调用。
+- **dispatching-parallel-agents**: 面对 2 个以上独立任务时使用。
+- **executing-plans**: 有书面计划需在单独会话执行时使用。
+- **finishing-a-development-branch**: 实现完成、测试通过后使用。
+- **mcp-builder**: MCP 服务器构建方法论。
+- **receiving-code-review**: 收到代码审查反馈后使用。
+- **requesting-code-review**: 完成任务或合并前使用。
+- **subagent-driven-development**: 含独立任务的实现计划执行时使用。
+- **systematic-debugging**: 遇到任何 bug 或异常时使用。
+- **test-driven-development**: 实现前先写测试。
+- **using-git-worktrees**: 需要隔离工作区时使用。
+- **using-superpowers**: 对话开始时使用——确立如何查找和使用技能。
+- **verification-before-completion**: 完成或提交前必须运行验证命令。
+- **workflow-runner**: 运行 agency-orchestrator YAML 工作流。
+- **writing-plans**: 有多步骤任务时使用。
+- **writing-skills**: 创建或编辑技能时使用。
 
 ## 如何使用
 
 当任务匹配某个 skill 时，使用 `Skill` 工具加载对应 skill 并严格遵循其流程。绝不要用 Read 工具读取 SKILL.md 文件。
-
-如果你认为哪怕只有 1% 的可能性某个 skill 适用于你正在做的事情，你必须调用该 skill 检查。
 <!-- superpowers-zh:end -->

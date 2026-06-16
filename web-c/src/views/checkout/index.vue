@@ -134,14 +134,6 @@ const onAddressSelect = (id: number | null) => {
   form.value.district = addr.district || ''
   form.value.detail = addr.detail
 }
-  selectedAddrId.value = addr.id
-  form.value.contactName = addr.contactName
-  form.value.phone = addr.phone
-  form.value.province = addr.province
-  form.value.city = addr.city
-  form.value.district = addr.district || ''
-  form.value.detail = addr.detail
-}
 
 const onSubmit = async () => {
   const { contactName, phone, province, city, detail } = form.value

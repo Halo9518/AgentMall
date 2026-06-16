@@ -54,7 +54,7 @@
     </van-tabs>
 
     <!-- 菜品列表 -->
-    <div class="dish-list">
+    <div class="dish-list" :style="{ paddingBottom: cartItemCount > 0 ? '70px' : '40px' }">
       <div v-for="dish in filteredDishes" :key="dish.id" class="dish-card">
         <div class="dish-image">
           <van-image
@@ -75,23 +75,58 @@
             <span class="dish-sales">已售 {{ dish.salesCount }}</span>
           </div>
         </div>
+        <div class="dish-add-btn">
+          <van-button
+            icon="plus"
+            size="small"
+            round
+            type="primary"
+            @click.stop="addToCart(dish)"
+          />
+        </div>
       </div>
 
       <van-empty v-if="!loading && filteredDishes.length === 0" description="暂无菜品" />
     </div>
 
     <van-loading v-if="loading" class="loading-center" type="spinner" />
+
+    <!-- 底部购物车栏 -->
+    <div class="cart-bar" v-if="cartItemCount > 0">
+      <div class="cart-bar-left" @click="$router.push('/cart')">
+        <van-icon name="cart-o" size="20" color="#fff" />
+        <span class="cart-badge">{{ cartItemCount }}</span>
+      </div>
+      <div class="cart-bar-center">
+        <span class="cart-total">¥{{ cartTotal.toFixed(2) }}</span>
+        <span class="cart-delivery" v-if="merchant">配送费 ¥{{ merchant.deliveryFee }}</span>
+      </div>
+      <van-button
+        type="primary"
+        round
+        size="small"
+        @click="goCheckout"
+      >
+        去结算
+      </van-button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { showNotify } from 'vant'
 import { getMerchantDetail, getCategories, getDishes } from '@/api/merchant'
 import type { Merchant, Category, DishVO } from '@/api/merchant'
+import { useCartStore } from '@/stores/cart'
+import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
+const router = useRouter()
 const merchantId = Number(route.params.id)
+const cartStore = useCartStore()
+const userStore = useUserStore()
 
 const merchant = ref<Merchant | null>(null)
 const categories = ref<Category[]>([])
@@ -105,8 +140,32 @@ const filteredDishes = computed(() => {
   return allDishes.value.filter((d) => d.categoryId === Number(catId))
 })
 
+const cartItemCount = computed(() => cartStore.itemCount)
+const cartTotal = computed(() => cartStore.cart.totalAmount)
+
 const onCategoryChange = () => {
   // computed reactivity handles filtering
+}
+
+const addToCart = async (dish: DishVO) => {
+  if (!userStore.isLoggedIn()) {
+    router.push({ name: 'login', query: { redirect: route.fullPath } })
+    return
+  }
+  try {
+    await cartStore.add(dish.id)
+    showNotify({ type: 'success', message: `已加入购物车：${dish.name}` })
+  } catch {
+    showNotify({ type: 'danger', message: '添加失败' })
+  }
+}
+
+const goCheckout = () => {
+  if (!userStore.isLoggedIn()) {
+    router.push({ name: 'login', query: { redirect: '/checkout' } })
+    return
+  }
+  router.push('/checkout')
 }
 
 onMounted(async () => {
@@ -123,6 +182,11 @@ onMounted(async () => {
     // error handled by interceptor
   } finally {
     loading.value = false
+  }
+
+  // 获取购物车数据（已登录时）
+  if (userStore.isLoggedIn()) {
+    cartStore.fetch()
   }
 })
 </script>
@@ -198,6 +262,13 @@ onMounted(async () => {
   margin-bottom: 10px;
   background: #fff;
   border-radius: 10px;
+  position: relative;
+}
+
+.dish-add-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
 }
 
 .dish-image-placeholder {
@@ -254,5 +325,58 @@ onMounted(async () => {
   display: flex;
   justify-content: center;
   padding-top: 60px;
+}
+
+.cart-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #2c2c2c;
+  z-index: 100;
+}
+
+.cart-bar-left {
+  position: relative;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.cart-badge {
+  position: absolute;
+  top: -8px;
+  right: -10px;
+  min-width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 9px;
+  background: #ee0a24;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 4px;
+}
+
+.cart-bar-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  color: #fff;
+}
+
+.cart-total {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.cart-delivery {
+  font-size: 11px;
+  color: #c8c9cc;
 }
 </style>
