@@ -5,6 +5,8 @@ import com.agentmall.common.exception.BusinessException;
 import com.agentmall.module.cart.service.CartService;
 import com.agentmall.module.cart.vo.CartItemVO;
 import com.agentmall.module.cart.vo.CartVO;
+import com.agentmall.module.merchant.entity.Merchant;
+import com.agentmall.module.merchant.service.MerchantService;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -24,9 +26,11 @@ public class CartServiceImpl implements CartService {
     private static final String CART_KEY_PREFIX = "cart:";
 
     private final StringRedisTemplate redis;
+    private final MerchantService merchantService;
 
-    public CartServiceImpl(StringRedisTemplate redis) {
+    public CartServiceImpl(StringRedisTemplate redis, MerchantService merchantService) {
         this.redis = redis;
+        this.merchantService = merchantService;
     }
 
     private String cartKey(Long userId) {
@@ -58,6 +62,12 @@ public class CartServiceImpl implements CartService {
         vo.setTotalAmount(items.stream()
                 .map(CartItemVO::getSubtotal)
                 .reduce(BigDecimal.ZERO, BigDecimal::add));
+        // 填充配送费
+        if (merchantId != null) {
+            Merchant merchant = merchantService.getById(merchantId);
+            vo.setDeliveryFee(merchant != null && merchant.getDeliveryFee() != null
+                    ? merchant.getDeliveryFee() : BigDecimal.ZERO);
+        }
         return vo;
     }
 

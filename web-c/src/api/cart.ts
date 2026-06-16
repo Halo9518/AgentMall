@@ -16,6 +16,7 @@ export interface CartVO {
   merchantName: string | null
   items: CartItem[]
   totalAmount: number
+  deliveryFee: number
 }
 
 /** 获取购物车 */

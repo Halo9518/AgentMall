@@ -7,10 +7,10 @@ import com.agentmall.module.dish.dto.DishDTO;
 import com.agentmall.module.dish.entity.Dish;
 import com.agentmall.module.dish.service.DishService;
 import com.agentmall.module.dish.vo.DishVO;
-import com.agentmall.module.merchant.entity.Merchant;
 import com.agentmall.module.merchant.service.MerchantService;
 import com.agentmall.module.user.entity.User;
 import com.agentmall.security.CurrentUser;
+import com.agentmall.security.MerchantContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -33,19 +33,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class DishManageController {
 
     private final DishService dishService;
-    private final MerchantService merchantService;
+    private final MerchantContext merchantContext;
 
-    public DishManageController(DishService dishService, MerchantService merchantService) {
+    public DishManageController(DishService dishService, MerchantContext merchantContext) {
         this.dishService = dishService;
-        this.merchantService = merchantService;
-    }
-
-    private Long getCurrentMerchantId(User user) {
-        Merchant merchant = merchantService.getByUserId(user.getId());
-        if (merchant == null) {
-            throw new BusinessException("商家不存在");
-        }
-        return merchant.getId();
+        this.merchantContext = merchantContext;
     }
 
     @Operation(summary = "菜品列表（分页）")
@@ -55,7 +47,7 @@ public class DishManageController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "10") int pageSize,
             @RequestParam(required = false) Long categoryId) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         var pageResult = dishService.pageByMerchant(merchantId, categoryId, page, pageSize);
         var records = pageResult.getRecords().stream().map(DishVO::fromEntity).toList();
         return Result.success(new PageResult<>(records, pageResult.getCurrent(), pageResult.getSize(), pageResult.getTotal()));
@@ -64,7 +56,7 @@ public class DishManageController {
     @Operation(summary = "添加菜品")
     @PostMapping
     public Result<DishVO> create(@CurrentUser User user, @Valid @RequestBody DishDTO dto) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         Dish dish = new Dish();
         dish.setMerchantId(merchantId);
         dish.setCategoryId(dto.getCategoryId());
@@ -80,7 +72,7 @@ public class DishManageController {
     @Operation(summary = "修改菜品")
     @PutMapping("/{id}")
     public Result<Void> update(@CurrentUser User user, @PathVariable Long id, @Valid @RequestBody DishDTO dto) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         Dish exist = dishService.getById(id);
         if (exist == null || !exist.getMerchantId().equals(merchantId)) {
             throw new BusinessException("菜品不存在");
@@ -97,7 +89,7 @@ public class DishManageController {
     @Operation(summary = "上下架")
     @PutMapping("/{id}/status")
     public Result<Void> toggleStatus(@CurrentUser User user, @PathVariable Long id) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         Dish exist = dishService.getById(id);
         if (exist == null || !exist.getMerchantId().equals(merchantId)) {
             throw new BusinessException("菜品不存在");
@@ -110,7 +102,7 @@ public class DishManageController {
     @Operation(summary = "删除菜品")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@CurrentUser User user, @PathVariable Long id) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         Dish exist = dishService.getById(id);
         if (exist == null || !exist.getMerchantId().equals(merchantId)) {
             throw new BusinessException("菜品不存在");

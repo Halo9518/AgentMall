@@ -23,6 +23,9 @@ public class CartVO {
     @Schema(description = "总金额")
     private BigDecimal totalAmount;
 
+    @Schema(description = "配送费")
+    private BigDecimal deliveryFee;
+
     public Long getMerchantId() { return merchantId; }
     public void setMerchantId(Long merchantId) { this.merchantId = merchantId; }
     public String getMerchantName() { return merchantName; }
@@ -31,4 +34,6 @@ public class CartVO {
     public void setItems(List<CartItemVO> items) { this.items = items; }
     public BigDecimal getTotalAmount() { return totalAmount; }
     public void setTotalAmount(BigDecimal totalAmount) { this.totalAmount = totalAmount; }
+    public BigDecimal getDeliveryFee() { return deliveryFee; }
+    public void setDeliveryFee(BigDecimal deliveryFee) { this.deliveryFee = deliveryFee; }
 }

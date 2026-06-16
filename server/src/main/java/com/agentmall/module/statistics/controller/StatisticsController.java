@@ -1,12 +1,10 @@
 package com.agentmall.module.statistics.controller;
 
 import com.agentmall.common.Result;
-import com.agentmall.common.exception.BusinessException;
-import com.agentmall.module.merchant.entity.Merchant;
-import com.agentmall.module.merchant.service.MerchantService;
 import com.agentmall.module.statistics.service.StatisticsService;
 import com.agentmall.module.user.entity.User;
 import com.agentmall.security.CurrentUser;
+import com.agentmall.security.MerchantContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,25 +24,17 @@ import java.util.Map;
 public class StatisticsController {
 
     private final StatisticsService statisticsService;
-    private final MerchantService merchantService;
+    private final MerchantContext merchantContext;
 
-    public StatisticsController(StatisticsService statisticsService, MerchantService merchantService) {
+    public StatisticsController(StatisticsService statisticsService, MerchantContext merchantContext) {
         this.statisticsService = statisticsService;
-        this.merchantService = merchantService;
-    }
-
-    private Long getCurrentMerchantId(User user) {
-        Merchant merchant = merchantService.getByUserId(user.getId());
-        if (merchant == null) {
-            throw new BusinessException("商家不存在");
-        }
-        return merchant.getId();
+        this.merchantContext = merchantContext;
     }
 
     @Operation(summary = "今日/周/月概览")
     @GetMapping("/overview")
     public Result<Map<String, Object>> overview(@CurrentUser User user) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         return Result.success(statisticsService.getOverview(merchantId));
     }
 
@@ -53,7 +43,7 @@ public class StatisticsController {
     public Result<List<Map<String, Object>>> trend(
             @CurrentUser User user,
             @RequestParam(defaultValue = "7") int days) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         return Result.success(statisticsService.getTrend(merchantId, days));
     }
 
@@ -62,7 +52,7 @@ public class StatisticsController {
     public Result<List<Map<String, Object>>> topDishes(
             @CurrentUser User user,
             @RequestParam(defaultValue = "10") int limit) {
-        Long merchantId = getCurrentMerchantId(user);
+        Long merchantId = merchantContext.getCurrentMerchantId(user);
         return Result.success(statisticsService.getTopDishes(merchantId, limit));
     }
 }
